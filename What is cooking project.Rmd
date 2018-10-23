@@ -1,0 +1,172 @@
+---
+title: "Cooking Project"
+author: "Jie Lu"
+date: "August 20, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE}
+library(jsonlite)
+library(tm)
+library(data.table)
+library(Matrix)
+library(caret)
+library(SnowballC)
+library(xgboost)
+library(dplyr)
+library(ggplot2)
+
+train  <- fromJSON("train.json", flatten = TRUE)
+test <- fromJSON("test.json", flatten = TRUE)
+
+#quickly plot the cuisines distribution
+ggplot(train, aes(reorder(cuisine,cuisine,function(x)+length(x))))+
+  geom_bar(fill="steelblue",width=0.5)+
+  coord_flip()+
+  labs(title = "Cuisines", y = "Number of Recipes", x = "Cuisine")
+```
+
+
+```{r}
+#combine train and test for data cleaning
+test$cuisine <- NA
+total <- rbind(train, test)
+
+#create a corpus
+corpus <- Corpus(VectorSource(total$ingredients))
+
+#make all words lowercase
+corpus <- tm_map(corpus, tolower)
+#remove the punctuation
+corpus <- tm_map(corpus, removePunctuation)
+#remove english stop words
+corpus <- tm_map(corpus, removeWords, c(stopwords('english')))
+#remove white space
+corpus <- tm_map(corpus, stripWhitespace)
+#stem the documents
+corpus <- tm_map(corpus, stemDocument)
+#remove numbers
+corpus <- tm_map(corpus, removeNumbers)
+#change back to plain text
+#corpus <- tm_map(corpus, PlainTextDocument)
+
+#build a term frequency matrix, use tf-idf weight
+DTM <- DocumentTermMatrix(corpus, control = list(weighting = function(x) weightTfIdf(x, normalize = FALSE)))
+
+#change it back to data frame
+DTM <- as.data.frame(as.matrix(DTM))
+
+#add a feature ingredients_n indicating the complexity of eaach cuisine
+DTM$ingredients_n  <- rowSums(DTM) #count each row (already tf-idf)
+```
+
+```{r}
+#let's visualize each ingredient
+t1 <- DTM[,-which(names(DTM) == "ingredients_n")]
+
+ingre <- colSums(as.matrix(t1))
+ord <- order(ingre)
+
+#check most and least used ingredients
+ingre[tail(ord)]
+ingre[head(ord)]
+```
+
+
+```{r}
+#create a data frame for visualization
+wf <- data.frame(word = names(ingre), freq = ingre)
+head(wf)
+#plot terms which appear atleast 20,000 times
+ggplot(subset(wf, freq >20000), aes(x=reorder(word,-freq), y=freq), ylim=c(10000,40000))+
+  geom_bar(stat = 'identity', fill="steelblue",width= 0.7)+
+  theme(axis.text.x=element_text(angle=45, hjust=1))+
+  coord_cartesian(ylim = c(20000, 38000))
+  
+```
+
+
+```{r, warning=FALSE}
+#create wordcloud for frequently used ingredients
+library(wordcloud)
+set.seed(4)
+wordcloud(names(ingre), ingre, min.freq = 5000, colors = brewer.pal(9, "GnBu"))
+```
+
+```{r, warning=FALSE}
+#plot 500 most used words
+wordcloud(names(ingre), ingre, max.words = 500, colors = brewer.pal(9, "Dark2"))
+```
+
+```{r}
+#split back into train and test data
+DTM$cuisine <- as.factor(total$cuisine)
+train_t <- DTM[1:nrow(train),]
+test_t <- DTM[-(1:nrow(train)),]
+
+#memory.limit(size=56000)
+xgbmat <- xgb.DMatrix(Matrix(data.matrix(train_t[,!colnames(train_t)%in%c("cuisine")])),
+                      label=as.numeric(train_t$cuisine)-1)
+
+#run xgbosting
+xgb <- xgboost(xgbmat,
+               max.depth = 25,
+               eta = 0.3,
+               nround = 100,
+               objective = "multi:softmax",
+               num_class = 20)
+
+```
+
+
+
+
+
+```{r}
+# plot the most important features
+names <- colnames(train_t[, !colnames(train_t) %in% c("cuisine")])
+importance_matrix <- xgb.importance(names, model = xgb)
+xgb.plot.importance(importance_matrix[1:30,])
+```
+
+
+
+```{r}
+#- predict on the SUBMIT set and change cuisine back to string
+#default as italian, in case some prediction missed
+test_t$cuisine = "italian"
+names(test_t)
+
+
+xgbmodel.predict <- predict(xgb, newdata = xgb.DMatrix(Matrix(data.matrix(test_t[,!colnames(test_t)%in%c("cuisine")]))))
+xgb.submit.text <- levels(train_t$cuisine)[xgbmodel.predict+1]
+
+length(xgb.submit.text)
+#- load sample submission file to use as a template
+sample_sub <- read.csv('sample_submission.csv')
+
+#- build and write the submission file
+submit_match   <- cbind(as.data.frame(test$id), as.data.frame(xgb.submit.text))
+colnames(submit_match) <- c("id", "cuisine")
+submit_match   <- data.table(submit_match, key='id')
+sample_sub <- data.table(sample_sub, key='id')
+
+
+
+
+#write.csv(submit_match, file ='xgboost_multiclass.csv', row.names=F, quote=F)
+
+```
+
+
+
+
+
+
+
+
+
